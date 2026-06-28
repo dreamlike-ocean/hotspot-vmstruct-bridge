@@ -1,4 +1,4 @@
-package top.dreamlike.jdk25.openlink;
+package io.github.dreamlike.hotspot.methodbridge;
 
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -11,15 +11,15 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-final class OpenLinkDemoTest {
+final class HotSpotMethodBridgeTest {
     private static long targetCount;
     private static long carrierCount;
     private static Method target;
     private static Method compiledCaller;
-    private static HotSpot25Linker.MethodState initialTarget;
-    private static HotSpot25Linker.MethodState carrierState;
-    private static HotSpot25Linker.MethodState linkedTarget;
-    private static HotSpot25Linker.Link link;
+    private static HotSpotMethodBridge.MethodState initialTarget;
+    private static HotSpotMethodBridge.MethodState carrierState;
+    private static HotSpotMethodBridge.MethodState linkedTarget;
+    private static HotSpotMethodBridge.Link link;
 
     public static void target() {
         targetCount++;
@@ -39,21 +39,21 @@ final class OpenLinkDemoTest {
 
     @BeforeAll
     static void linkTargetToCarrier() throws Exception {
-        target = OpenLinkDemoTest.class.getDeclaredMethod("target");
-        Method carrier = OpenLinkDemoTest.class.getDeclaredMethod("carrier");
-        compiledCaller = OpenLinkDemoTest.class.getDeclaredMethod("compiledCaller");
+        target = HotSpotMethodBridgeTest.class.getDeclaredMethod("target");
+        Method carrier = HotSpotMethodBridgeTest.class.getDeclaredMethod("carrier");
+        compiledCaller = HotSpotMethodBridgeTest.class.getDeclaredMethod("compiledCaller");
 
-        initialTarget = HotSpot25Linker.state(target);
+        initialTarget = HotSpotMethodBridge.state(target);
         assertEquals(0, initialTarget.code());
-        assertTrue(HotSpot25Linker.compileNow(carrier, 4));
-        carrierState = HotSpot25Linker.waitForCode(carrier, 5_000);
+        assertTrue(HotSpotMethodBridge.compileNow(carrier, 4));
+        carrierState = HotSpotMethodBridge.waitForCode(carrier, 5_000);
         assertNotEquals(0, carrierState.code());
 
-        link = HotSpot25Linker.linkToCarrier(target, carrier);
-        linkedTarget = HotSpot25Linker.state(target);
+        link = HotSpotMethodBridge.linkToCarrier(target, carrier);
+        linkedTarget = HotSpotMethodBridge.state(target);
 
-        assertTrue(HotSpot25Linker.compileNow(compiledCaller, 4));
-        assertNotEquals(0, HotSpot25Linker.waitForCode(compiledCaller, 5_000).code());
+        assertTrue(HotSpotMethodBridge.compileNow(compiledCaller, 4));
+        assertNotEquals(0, HotSpotMethodBridge.waitForCode(compiledCaller, 5_000).code());
     }
 
     @BeforeEach
@@ -70,16 +70,16 @@ final class OpenLinkDemoTest {
         assertEquals(carrierState.compiledEntry(), linkedTarget.compiledEntry());
         assertEquals(carrierState.interpretedEntry(), linkedTarget.interpretedEntry());
         assertEquals(initialTarget.interpreterEntry(), linkedTarget.interpreterEntry());
-        assertTrue(HotSpot25Linker.isCurrent(link));
+        assertTrue(HotSpotMethodBridge.isCurrent(link));
     }
 
     @Test
     @DisplayName("target 被请求编译后不会覆盖已经安装的 carrier nmethod")
     void targetCompileRequestDoesNotOverwriteLink() {
-        HotSpot25Linker.MethodState beforeTargetCompile = HotSpot25Linker.state(target);
-        HotSpot25Linker.compileNow(target, 1);
-        assertEquals(beforeTargetCompile, HotSpot25Linker.state(target));
-        assertTrue(HotSpot25Linker.isCurrent(link));
+        HotSpotMethodBridge.MethodState beforeTargetCompile = HotSpotMethodBridge.state(target);
+        HotSpotMethodBridge.compileNow(target, 1);
+        assertEquals(beforeTargetCompile, HotSpotMethodBridge.state(target));
+        assertTrue(HotSpotMethodBridge.isCurrent(link));
     }
 
     @Test

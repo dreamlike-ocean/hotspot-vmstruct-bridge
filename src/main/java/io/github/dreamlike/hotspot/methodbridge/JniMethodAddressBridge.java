@@ -1,4 +1,4 @@
-package top.dreamlike.jdk25.openlink;
+package io.github.dreamlike.hotspot.methodbridge;
 
 import java.lang.reflect.Method;
 

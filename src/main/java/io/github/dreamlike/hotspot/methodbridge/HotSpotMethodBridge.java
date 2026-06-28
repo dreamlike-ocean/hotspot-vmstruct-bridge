@@ -1,4 +1,4 @@
-package top.dreamlike.jdk25.openlink;
+package io.github.dreamlike.hotspot.methodbridge;
 
 import java.lang.foreign.Arena;
 import java.lang.foreign.FunctionDescriptor;
@@ -17,7 +17,7 @@ import java.nio.file.Path;
 import java.util.Locale;
 import java.util.concurrent.locks.LockSupport;
 
-public final class HotSpot25Linker {
+public final class HotSpotMethodBridge {
     private static final Linker LINKER = Linker.nativeLinker();
     private static final long ADDRESS_SIZE = ValueLayout.ADDRESS.byteSize();
     private static final int JNI_VERSION_1_8 = 0x0001_0008;
@@ -34,7 +34,7 @@ public final class HotSpot25Linker {
                     .orElseThrow(),
             FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_INT, ValueLayout.ADDRESS));
 
-    private HotSpot25Linker() {
+    private HotSpotMethodBridge() {
     }
 
     //只是用来替换两个方法的把carrier的绑定到target上
@@ -86,7 +86,7 @@ public final class HotSpot25Linker {
         return Hidden.compile(methodAddress(method), level);
     }
 
-    // jit可能是异步的 但是你可以参考top.dreamlike.jdk25.openlink.OpenLinkDemoTest.installCompilerDirectives做个同步的
+    // jit可能是异步的 但是你可以参考io.github.dreamlike.hotspot.methodbridge.HotSpotMethodBridgeTest.installCompilerDirectives做个同步的
     public static MethodState waitForCode(Method method, long timeoutMillis) {
         long deadline = System.nanoTime() + timeoutMillis * 1_000_000L;
         MethodState state;
@@ -237,7 +237,7 @@ public final class HotSpot25Linker {
     }
 
     private static final class NativeBridge {
-        private static final String BRIDGE_CLASS_NAME = "top.dreamlike.jdk25.openlink.JniMethodAddressBridge";
+        private static final String BRIDGE_CLASS_NAME = JniMethodAddressBridge.class.getName();
         private static final int FIND_CLASS = 6;
         private static final int FROM_REFLECTED_METHOD = 7;
         private static final int NEW_GLOBAL_REF = 21;
