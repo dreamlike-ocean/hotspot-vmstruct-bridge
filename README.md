@@ -51,7 +51,7 @@ src/test/java/top/dreamlike/jdk25/openlink/OpenLinkDemoTest.java
 1. 通过 `gHotSpotVMStructs` 找到 HotSpot 字段偏移；`VMStructEntry` 表项布局也从 HotSpot 导出的 `gHotSpotVMStructEntry*Offset` 和 `gHotSpotVMStructEntryArrayStride` 读取。
 2. 运行时用 JNI `Class.forName(name, false, Thread.currentThread().getContextClassLoader())` 找到已有的 `JniMethodAddressBridge`，并通过 `RegisterNatives` 把它的 `resolve(Method): long` 绑定到 FFM upcall。
 3. native upcall 里拿到 `Method` 的 `jobject`，调用 JNI `FromReflectedMethod` 得到 `jmethodID`，再调用 HotSpot `Method::checked_resolve_jmethod_id` 得到 `Method*`。
-4. 解析 Mach-O local symbol，调用 `JavaThread::current()` 取当前线程，再调用 `WhiteBox::compile_method(Method*, int, int, JavaThread*)` 让 carrier 生成合法 nmethod。
+4. 按当前平台解析 `libjvm` local symbol，调用 `Thread::current()` 取当前 HotSpot 线程，再调用 `WhiteBox::compile_method(Method*, int, int, JavaThread*)` 让 carrier 生成合法 nmethod。
 5. 给 target 的 `MethodFlags` 打 not-compilable 和 dont-inline 标记，避免 target 之后被 JVM 自己编译覆盖，也避免编译调用方把 target 的 Java bytecode inline 进去。
 6. 按 `Method::set_code` 的发布顺序写 target：
 
@@ -232,14 +232,14 @@ methodFlagsOffset = offset(Method::_intrinsic_id) - sizeof(MethodFlags::_status)
 
 `Method::_code` 不是稳定绑定。它是 HotSpot tiered compilation/deopt 的当前入口缓存：carrier 从 C1 换到 C2、被 `make_not_entrant`、或被 deopt 时，只会更新 carrier 自己的 `Method`，不会自动同步已经手工写过的 target。`HotSpot25Linker.isCurrent(link)` 只做快照校验；变成 `false` 后需要重新 link，不能继续调用旧 target。
 
-当前 `compileNow` 验证了 macOS arm64 + Corretto 25 / Corretto 26 / loom-ea。它依赖 `libjvm.dylib` 保留这些 local C++ symbol：
+当前 `compileNow` 验证了 macOS arm64 + Corretto 25，以及 OrbStack Linux aarch64 + Corretto 25.0.1。它依赖 `libjvm` 保留这些 local C++ symbol：
 
 ```text
-__ZN6Method26checked_resolve_jmethod_idEP10_jmethodID
-__ZN10JavaThread7currentEv
-__ZN8WhiteBox14compile_methodEP6MethodiiP10JavaThread
+_ZN6Method26checked_resolve_jmethod_idEP10_jmethodID
+_ZN6Thread7currentEv
+_ZN8WhiteBox14compile_methodEP6MethodiiP10JavaThread
 ```
 
-这些不是 exported symbol。其他发行版、Linux stripped build、Windows MSVC build 都不能假定可用。
+Mach-O 文件符号表会在上述 Itanium ABI 名字前再多一个 `_`；ELF 直接使用上述名字。Windows 动态库格式是 PE/COFF，当前实现只在选到 Windows 时抛出未实现异常。
 
-link 层可以继续抽出来做跨平台；无 warmup 的 `compileNow` 层如果要跨平台，需要分别实现 ELF/PE/PDB 符号解析，或者换一个更稳定的 JVM 内部入口。
+这些不是稳定 exported symbol。其他发行版、Linux stripped build 都不能假定可用。

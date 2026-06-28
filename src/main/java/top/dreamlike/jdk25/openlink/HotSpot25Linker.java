@@ -11,19 +11,23 @@ import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
 import java.lang.invoke.VarHandle;
 import java.lang.reflect.Method;
-import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Locale;
 import java.util.concurrent.locks.LockSupport;
 
 public final class HotSpot25Linker {
     private static final Linker LINKER = Linker.nativeLinker();
     private static final long ADDRESS_SIZE = ValueLayout.ADDRESS.byteSize();
     private static final int JNI_VERSION_1_8 = 0x0001_0008;
+    // 来源：src/hotspot/share/oops/methodFlags.hpp 的 MethodFlags。
+    // 1<<8 is_not_c2_compilable, 1<<9 is_not_c1_compilable,
+    // 1<<10 is_not_c2_osr_compilable, 1<<12 dont_inline。
     private static final int METHOD_FLAGS_TARGET_BITS = (1 << 8) | (1 << 9) | (1 << 10) | (1 << 12);
     private static final VarHandle INT_HANDLE = ValueLayout.JAVA_INT.varHandle();
     private static final NMethodLayout N_METHOD_LAYOUT = NMethodLayout.load();
+    private static final NativeSymbols NATIVE_SYMBOLS = NativeSymbols.current();
     private static final MethodHandle JNI_GET_CREATED_JAVA_VMS = LINKER.downcallHandle(
             SymbolLookup.libraryLookup(VmStructs.libjvm(), Arena.global())
                     .find("JNI_GetCreatedJavaVMs")
@@ -33,6 +37,7 @@ public final class HotSpot25Linker {
     private HotSpot25Linker() {
     }
 
+    //只是用来替换两个方法的把carrier的绑定到target上
     public static Link linkToCarrier(Method target, Method carrier) {
         long targetMethod = methodAddress(target);
         long carrierMethod = methodAddress(carrier);
@@ -64,6 +69,7 @@ public final class HotSpot25Linker {
 
     private static void suppressTargetCompilation(long targetMethod) {
         long flagsAddress = targetMethod + N_METHOD_LAYOUT.methodFlagsOffset;
+        // 禁止编译和inline防止替换之后被jvm修改
         INT_HANDLE.getAndBitwiseOr(memory(flagsAddress, Integer.BYTES), 0L, METHOD_FLAGS_TARGET_BITS);
     }
 
@@ -148,6 +154,7 @@ public final class HotSpot25Linker {
         private static NMethodLayout load() {
             VmStructs vm = new VmStructs();
             return new NMethodLayout(
+                    // 这个flag确实是没在vmstruct中导出 所以只能根据源码倒推了
                     vm.offset("Method", "_intrinsic_id") - Integer.BYTES,
                     vm.offset("Method", "_i2i_entry"),
                     vm.offset("Method", "_code"),
@@ -181,6 +188,7 @@ public final class HotSpot25Linker {
         }
 
         private long find(String typeName, String fieldName) {
+            //VMStructEntry 本质上是 HotSpot 给“外部观察者”导出的 C++ 字段元数据表。每条记录描述一个 VM 内部字段
             for (long entry = entries; ; entry += stride) {
                 long typePtr = getAddress(entry + typeNameOffset);
                 long fieldPtr = getAddress(entry + fieldNameOffset);
@@ -256,7 +264,7 @@ public final class HotSpot25Linker {
         private static final MethodHandle REGISTER_NATIVES_HANDLE;
         private static final MethodHandle EXCEPTION_CHECK_HANDLE;
         private static final MethodHandle CHECKED_RESOLVE_JMETHOD_ID = LINKER.downcallHandle(
-                MemorySegment.ofAddress(MachO.symbol("__ZN6Method26checked_resolve_jmethod_idEP10_jmethodID")),
+                MemorySegment.ofAddress(NATIVE_SYMBOLS.checkedResolveJmethodId()),
                 FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
 
         static {
@@ -384,10 +392,10 @@ public final class HotSpot25Linker {
 
         //todo 尽可能不要依赖于cpp符号 后面看看怎么搞
         private static final MethodHandle JAVA_THREAD_CURRENT = LINKER.downcallHandle(
-                MemorySegment.ofAddress(MachO.symbol("__ZN10JavaThread7currentEv")),
+                MemorySegment.ofAddress(NATIVE_SYMBOLS.threadCurrent()),
                 FunctionDescriptor.of(ValueLayout.ADDRESS));
         private static final MethodHandle WHITEBOX_COMPILE_METHOD = LINKER.downcallHandle(
-                MemorySegment.ofAddress(MachO.symbol("__ZN8WhiteBox14compile_methodEP6MethodiiP10JavaThread")),
+                MemorySegment.ofAddress(NATIVE_SYMBOLS.whiteBoxCompileMethod()),
                 FunctionDescriptor.of(ValueLayout.JAVA_BOOLEAN, ValueLayout.ADDRESS, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.ADDRESS));
 
         private static boolean compile(long method, int level) {
@@ -431,53 +439,85 @@ public final class HotSpot25Linker {
         }
     }
 
-    private static final class MachO {
-        private static final int LC_SYMTAB = 0x2;
-        private static final long BASE = runtimeAddress("gHotSpotVMStructs") - fileSymbol("_gHotSpotVMStructs");
+    private interface NativeSymbols {
+        long checkedResolveJmethodId();
 
-        static long symbol(String name) {
-            long value = fileSymbol(name);
+        long threadCurrent();
+
+        long whiteBoxCompileMethod();
+
+        static NativeSymbols current() {
+            String os = System.getProperty("os.name").toLowerCase(Locale.ROOT);
+            if (os.contains("mac") || os.contains("darwin")) {
+                return new MachO();
+            }
+            if (os.contains("linux")) {
+                return new Elf();
+            }
+            if (os.contains("win")) {
+                return new PeCoff();
+            }
+            throw new UnsupportedOperationException("unsupported OS: " + os);
+        }
+    }
+
+    private static final class MachO implements NativeSymbols {
+        private static final int LC_SYMTAB = 0x2;
+        private final long base = runtimeAddress("gHotSpotVMStructs") - fileSymbol("_gHotSpotVMStructs");
+
+        @Override
+        public long checkedResolveJmethodId() {
+            return symbol("_ZN6Method26checked_resolve_jmethod_idEP10_jmethodID");
+        }
+
+        @Override
+        public long threadCurrent() {
+            return symbol("_ZN6Thread7currentEv");
+        }
+
+        @Override
+        public long whiteBoxCompileMethod() {
+            return symbol("_ZN8WhiteBox14compile_methodEP6MethodiiP10JavaThread");
+        }
+
+        private long symbol(String name) {
+            long value = fileSymbol("_" + name);
             if (value == 0) {
                 throw new IllegalStateException("Mach-O symbol not found: " + name);
             }
-            return BASE + value;
+            return base + value;
         }
 
-        private static long runtimeAddress(String name) {
-            return SymbolLookup.libraryLookup(VmStructs.libjvm(), Arena.global())
-                    .find(name)
-                    .orElseThrow()
-                    .address();
-        }
-
-        private static long fileSymbol(String name) {
+        private long fileSymbol(String name) {
             try {
                 byte[] bytes = Files.readAllBytes(Path.of(VmStructs.libjvm()));
-                ByteBuffer bb = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN);
-                if (bb.getInt(0) != 0xfeedfacf) {
+                MemorySegment file = MemorySegment.ofArray(bytes);
+                ValueLayout.OfInt intLayout = ValueLayout.JAVA_INT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
+                ValueLayout.OfLong longLayout = ValueLayout.JAVA_LONG_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
+                if (file.get(intLayout, 0) != 0xfeedfacf) {
                     throw new IllegalStateException("only little-endian Mach-O 64 is implemented");
                 }
-                int ncmds = bb.getInt(16);
+                int ncmds = file.get(intLayout, 16);
                 int command = 32;
                 int symoff = 0;
                 int nsyms = 0;
                 int stroff = 0;
                 for (int i = 0; i < ncmds; i++) {
-                    int cmd = bb.getInt(command);
-                    int cmdsize = bb.getInt(command + 4);
+                    int cmd = file.get(intLayout, command);
+                    int cmdsize = file.get(intLayout, command + 4);
                     if (cmd == LC_SYMTAB) {
-                        symoff = bb.getInt(command + 8);
-                        nsyms = bb.getInt(command + 12);
-                        stroff = bb.getInt(command + 16);
+                        symoff = file.get(intLayout, command + 8);
+                        nsyms = file.get(intLayout, command + 12);
+                        stroff = file.get(intLayout, command + 16);
                         break;
                     }
                     command += cmdsize;
                 }
                 for (int i = 0; i < nsyms; i++) {
                     int entry = symoff + i * 16;
-                    int strx = bb.getInt(entry);
-                    if (name.equals(cString(bytes, stroff + strx))) {
-                        return bb.getLong(entry + 8);
+                    int strx = file.get(intLayout, entry);
+                    if (name.equals(fileCString(bytes, stroff + strx))) {
+                        return file.get(longLayout, entry + 8);
                     }
                 }
                 return 0;
@@ -486,12 +526,140 @@ public final class HotSpot25Linker {
             }
         }
 
-        private static String cString(byte[] bytes, int offset) {
-            int end = offset;
-            while (bytes[end] != 0) {
-                end++;
+    }
+
+    private static final class Elf implements NativeSymbols {
+        private static final int SHT_SYMTAB = 2;
+        private static final int SHT_DYNSYM = 11;
+
+        private final byte[] bytes;
+        private final MemorySegment file;
+        private final ValueLayout.OfShort shortLayout;
+        private final ValueLayout.OfInt intLayout;
+        private final ValueLayout.OfLong longLayout;
+        private final long sectionHeaderOffset;
+        private final int sectionHeaderSize;
+        private final int sectionCount;
+        private final long base;
+
+        private Elf() {
+            try {
+                bytes = Files.readAllBytes(Path.of(VmStructs.libjvm()));
+                if (bytes[0] != 0x7f || bytes[1] != 'E' || bytes[2] != 'L' || bytes[3] != 'F') {
+                    throw new IllegalStateException("not an ELF file");
+                }
+                if (bytes[4] != 2) {
+                    throw new IllegalStateException("only ELF64 is implemented");
+                }
+                ByteOrder order = switch (bytes[5]) {
+                    case 1 -> ByteOrder.LITTLE_ENDIAN;
+                    case 2 -> ByteOrder.BIG_ENDIAN;
+                    default -> throw new IllegalStateException("unknown ELF byte order");
+                };
+                file = MemorySegment.ofArray(bytes);
+                shortLayout = ValueLayout.JAVA_SHORT_UNALIGNED.withOrder(order);
+                intLayout = ValueLayout.JAVA_INT_UNALIGNED.withOrder(order);
+                longLayout = ValueLayout.JAVA_LONG_UNALIGNED.withOrder(order);
+                sectionHeaderOffset = elfLong(40);
+                sectionHeaderSize = Short.toUnsignedInt(elfShort(58));
+                sectionCount = Short.toUnsignedInt(elfShort(60));
+                base = runtimeAddress("gHotSpotVMStructs") - fileSymbol("gHotSpotVMStructs");
+            } catch (Exception e) {
+                throw new RuntimeException(e);
             }
-            return new String(bytes, offset, end - offset, java.nio.charset.StandardCharsets.US_ASCII);
         }
+
+        @Override
+        public long checkedResolveJmethodId() {
+            return symbol("_ZN6Method26checked_resolve_jmethod_idEP10_jmethodID");
+        }
+
+        @Override
+        public long threadCurrent() {
+            return symbol("_ZN6Thread7currentEv");
+        }
+
+        @Override
+        public long whiteBoxCompileMethod() {
+            return symbol("_ZN8WhiteBox14compile_methodEP6MethodiiP10JavaThread");
+        }
+
+        private long symbol(String name) {
+            long value = fileSymbol(name);
+            if (value == 0) {
+                throw new IllegalStateException("ELF symbol not found: " + name);
+            }
+            return base + value;
+        }
+
+        private long fileSymbol(String name) {
+            for (int i = 0; i < sectionCount; i++) {
+                long section = section(i);
+                int type = elfInt(section + 4);
+                if (type != SHT_SYMTAB && type != SHT_DYNSYM) {
+                    continue;
+                }
+                long symOffset = elfLong(section + 24);
+                long symSize = elfLong(section + 32);
+                int stringSectionIndex = elfInt(section + 40);
+                long symEntrySize = elfLong(section + 56);
+                long stringOffset = elfLong(section(stringSectionIndex) + 24);
+                for (long entry = symOffset; entry < symOffset + symSize; entry += symEntrySize) {
+                    int nameOffset = elfInt(entry);
+                    if (nameOffset != 0 && name.equals(fileCString(bytes, Math.toIntExact(stringOffset + nameOffset)))) {
+                        return elfLong(entry + 8);
+                    }
+                }
+            }
+            return 0;
+        }
+
+        private long section(int index) {
+            return sectionHeaderOffset + (long) index * sectionHeaderSize;
+        }
+
+        private short elfShort(long offset) {
+            return file.get(shortLayout, offset);
+        }
+
+        private int elfInt(long offset) {
+            return file.get(intLayout, offset);
+        }
+
+        private long elfLong(long offset) {
+            return file.get(longLayout, offset);
+        }
+    }
+
+    private static final class PeCoff implements NativeSymbols {
+        @Override
+        public long checkedResolveJmethodId() {
+            throw new UnsupportedOperationException("PE/COFF symbol lookup is not implemented");
+        }
+
+        @Override
+        public long threadCurrent() {
+            throw new UnsupportedOperationException("PE/COFF symbol lookup is not implemented");
+        }
+
+        @Override
+        public long whiteBoxCompileMethod() {
+            throw new UnsupportedOperationException("PE/COFF symbol lookup is not implemented");
+        }
+    }
+
+    private static long runtimeAddress(String name) {
+        return SymbolLookup.libraryLookup(VmStructs.libjvm(), Arena.global())
+                .find(name)
+                .orElseThrow()
+                .address();
+    }
+
+    private static String fileCString(byte[] bytes, int offset) {
+        int end = offset;
+        while (bytes[end] != 0) {
+            end++;
+        }
+        return new String(bytes, offset, end - offset, java.nio.charset.StandardCharsets.US_ASCII);
     }
 }
