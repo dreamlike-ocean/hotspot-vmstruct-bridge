@@ -8,6 +8,7 @@ JDK 25 HotSpot-family VMStructs / native runtime bridge PoC。
 
 ```text
 hotspot-vmstruct-base     基础 VMStructs、libjvm lookup、裸地址读写、平台符号解析和 layout
+hotspot-codecache-inspector 纯 Java/FFM CodeCache 观察器
 hotspot-method-bridge     Method* -> nmethod / CodeCache entry link PoC
 ```
 
@@ -250,6 +251,17 @@ target._from_interpreted_entry = target.get_i2c_entry()
 ```
 
 解释器进入 target 时先走 i2c adapter。以 aarch64 为例，[`gen_i2c_adapter`](https://github.com/openjdk/jdk/blame/548a95379f159a0dc369f6bb80d8167ec835c7cd/src/hotspot/cpu/aarch64/sharedRuntime_aarch64.cpp#L562-L657) 会把解释器栈参数搬到 compiled Java ABI 寄存器，最后跳到 `Method::_from_compiled_entry`。因此 raw entry 需要遵守 HotSpot compiled Java ABI，不是 JNI ABI。
+
+`hotspot-codecache-inspector` 是只读观察模块，不引入 JNI/native 源码。入口：
+
+```java
+CodeCacheEntry[] entries = HotSpotCodeCache.snapshot();
+CodeCacheEntry[] nmethods = HotSpotCodeCache.nmethods();
+```
+
+第一版按 SA 的 `CodeHeap` 扫描方式遍历当前进程的 `CodeCache::_heaps`，输出每个可识别 `CodeBlob` 的 kind、name、code 地址/长度；其中 kind 映射成 `CodeBlobKind` enum，name 仍然是 HotSpot 的 `const char*`。对 `nmethod` 额外输出 compile id、`CompilationLevel`、`Method` 来源签名、entry bci、OSR 标记、`NMethodState`、exception handler stub 地址、handler table 长度和 implicit exception table 长度。
+
+这个遍历不进入 VM，不拿 `CodeCache_lock`，因此不会主动制造 safepoint；相应地它也不阻止并发编译、CodeCache GC 或 nmethod 状态变化，结果是 best-effort snapshot。`nmethod::_exception_offset` 只能定位通用 exception handler stub，不能直接给出 Java catch 类型，所以 `exceptionType` 第一版只在存在 stub 时标成 `unknown`。
 
 macOS/aarch64 的 W^X 定义在 [`os.hpp`](https://github.com/openjdk/jdk/blame/548a95379f159a0dc369f6bb80d8167ec835c7cd/src/hotspot/share/runtime/os.hpp#L143-L146)：
 

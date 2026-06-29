@@ -36,8 +36,24 @@ public final class HotSpotMemory {
         return memory(address, Long.BYTES).get(ValueLayout.JAVA_LONG, 0);
     }
 
+    public static short getShort(long address) {
+        return memory(address, Short.BYTES).get(ValueLayout.JAVA_SHORT, 0);
+    }
+
     public static byte getByte(long address) {
         return memory(address, Byte.BYTES).get(ValueLayout.JAVA_BYTE, 0);
+    }
+
+    public static int getUnsignedByte(long address) {
+        return Byte.toUnsignedInt(getByte(address));
+    }
+
+    public static int getUnsignedShort(long address) {
+        return Short.toUnsignedInt(getShort(address));
+    }
+
+    public static long getUnsignedInt(long address) {
+        return Integer.toUnsignedLong(getInt(address));
     }
 
     public static String cString(long address) {

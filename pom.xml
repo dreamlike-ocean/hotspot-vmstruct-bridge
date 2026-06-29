@@ -11,6 +11,7 @@
 
     <modules>
         <module>hotspot-vmstruct-base</module>
+        <module>hotspot-codecache-inspector</module>
         <module>hotspot-method-bridge</module>
     </modules>
 

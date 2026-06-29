@@ -1,5 +1,7 @@
 package io.github.dreamlike.hotspot.vmstruct;
 
+import java.util.OptionalInt;
+
 public final class VmStructs {
     private final long entries;
     private final long typeNameOffset;
@@ -8,6 +10,14 @@ public final class VmStructs {
     private final long offsetOffset;
     private final long addressOffset;
     private final long stride;
+    private final long typeEntries;
+    private final long typeEntryTypeNameOffset;
+    private final long typeEntrySizeOffset;
+    private final long typeEntryStride;
+    private final long intConstantEntries;
+    private final long intConstantNameOffset;
+    private final long intConstantValueOffset;
+    private final long intConstantStride;
 
     private VmStructs() {
         entries = HotSpotMemory.getAddress(symbol("gHotSpotVMStructs"));
@@ -17,6 +27,14 @@ public final class VmStructs {
         offsetOffset = HotSpotMemory.getLong(symbol("gHotSpotVMStructEntryOffsetOffset"));
         addressOffset = HotSpotMemory.getLong(symbol("gHotSpotVMStructEntryAddressOffset"));
         stride = HotSpotMemory.getLong(symbol("gHotSpotVMStructEntryArrayStride"));
+        typeEntries = HotSpotMemory.getAddress(symbol("gHotSpotVMTypes"));
+        typeEntryTypeNameOffset = HotSpotMemory.getLong(symbol("gHotSpotVMTypeEntryTypeNameOffset"));
+        typeEntrySizeOffset = HotSpotMemory.getLong(symbol("gHotSpotVMTypeEntrySizeOffset"));
+        typeEntryStride = HotSpotMemory.getLong(symbol("gHotSpotVMTypeEntryArrayStride"));
+        intConstantEntries = HotSpotMemory.getAddress(symbol("gHotSpotVMIntConstants"));
+        intConstantNameOffset = HotSpotMemory.getLong(symbol("gHotSpotVMIntConstantEntryNameOffset"));
+        intConstantValueOffset = HotSpotMemory.getLong(symbol("gHotSpotVMIntConstantEntryValueOffset"));
+        intConstantStride = HotSpotMemory.getLong(symbol("gHotSpotVMIntConstantEntryArrayStride"));
     }
 
     public static VmStructs current() {
@@ -31,6 +49,28 @@ public final class VmStructs {
     public long staticAddress(String typeName, String fieldName) {
         long entry = find(typeName, fieldName, true);
         return HotSpotMemory.getAddress(entry + addressOffset);
+    }
+
+    public long typeSize(String typeName) {
+        long entry = findType(typeName);
+        return HotSpotMemory.getLong(entry + typeEntrySizeOffset);
+    }
+
+    public int intConstant(String name) {
+        return optionalIntConstant(name)
+                .orElseThrow(() -> new IllegalArgumentException("VMIntConstant not found: " + name));
+    }
+
+    public OptionalInt optionalIntConstant(String name) {
+        for (long entry = intConstantEntries; ; entry += intConstantStride) {
+            long namePtr = HotSpotMemory.getAddress(entry + intConstantNameOffset);
+            if (namePtr == 0) {
+                return OptionalInt.empty();
+            }
+            if (name.equals(HotSpotMemory.cString(namePtr))) {
+                return OptionalInt.of(HotSpotMemory.getInt(entry + intConstantValueOffset));
+            }
+        }
     }
 
     private long find(String typeName, String fieldName, boolean isStatic) {
@@ -48,6 +88,19 @@ public final class VmStructs {
             }
         }
         throw new IllegalArgumentException("VMStruct not found: " + typeName + "::" + fieldName);
+    }
+
+    private long findType(String typeName) {
+        for (long entry = typeEntries; ; entry += typeEntryStride) {
+            long typePtr = HotSpotMemory.getAddress(entry + typeEntryTypeNameOffset);
+            if (typePtr == 0) {
+                break;
+            }
+            if (typeName.equals(HotSpotMemory.cString(typePtr))) {
+                return entry;
+            }
+        }
+        throw new IllegalArgumentException("VMType not found: " + typeName);
     }
 
     public static long symbol(String name) {
